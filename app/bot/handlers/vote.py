@@ -170,9 +170,13 @@ async def handle_phone_submission(message: Message, state: FSMContext, session: 
     image_b64 = captcha_data.get("image")
 
     try:
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
         image_bytes = base64.b64decode(image_b64)
         photo = BufferedInputFile(image_bytes, filename="captcha.jpg")
-        await wait_msg.delete()
 
         await message.answer_photo(
             photo=photo,

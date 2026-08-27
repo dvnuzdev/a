@@ -9,8 +9,7 @@ logger = logging.getLogger(__name__)
 USER_AGENTS = [
     "Dart/3.3 (dart:io)",
     "Mozilla/5.0 (Linux; Android 12; MEmu Build/SKQ1.211019.001) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/105.0.5195.136 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 ]
 
 UZBEK_ISP_PREFIXES = [
@@ -23,51 +22,59 @@ def generate_uzbek_ip() -> str:
 
 class OpenBudgetAPIService:
     """
-    Official OpenBudget API v2 Service
+    High-Speed Official OpenBudget API v2 Service
     Extracted from the official OpenBudget Android Application (uz.minfin.open_budget)
     """
 
     def __init__(self):
         self.base_url_v2 = "https://openbudget.uz/api/v2"
         self.base_url_v1 = "https://openbudget.uz/api/v1"
-        self.timeout = 15.0
+        self.timeout = 7.0
+        self._client: Optional[httpx.AsyncClient] = None
 
-    def _get_headers(self, host: str = "openbudget.uz") -> Dict[str, str]:
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            limits = httpx.Limits(max_keepalive_connections=50, max_connections=100, keepalive_expiry=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                limits=limits,
+                follow_redirects=True,
+                verify=False
+            )
+        return self._client
+
+    def _get_headers(self) -> Dict[str, str]:
         ip = generate_uzbek_ip()
         return {
-            "Host": host,
-            "User-Agent": random.choice(USER_AGENTS),
+            "User-Agent": "Dart/3.3 (dart:io)",
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
-            "Origin": f"https://{host}",
-            "Referer": f"https://{host}/boards/initiatives",
-            "REMOTE_ADDR": ip,
-            "HTTP_X_FORWARDED_FOR": ip,
-            "HTTP_X_REAL_IP": ip,
+            "Origin": "https://openbudget.uz",
+            "Referer": "https://openbudget.uz/boards/initiatives",
             "X-Forwarded-For": ip,
+            "X-Real-IP": ip,
         }
 
     async def get_captcha(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Fetch new captcha image and captchaKey from OpenBudget API v2.
-        Returns: (success: bool, message: str, data: dict with 'captchaKey' and 'image' base64)
+        Fetch new captcha image and captchaKey from OpenBudget API v2 (ultra-fast).
         """
         url = f"{self.base_url_v2}/vote/captcha-2"
-        headers = self._get_headers()
+        client = self._get_client()
 
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, verify=False) as client:
+        for attempt in range(2):
             try:
+                headers = self._get_headers()
                 response = await client.get(url, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
                     captcha_key = data.get("captchaKey") or data.get("key") or data.get("captcha_key")
                     image_base64 = data.get("image") or data.get("captcha_image")
                     return True, "Captcha yuklandi", {"captchaKey": captcha_key, "image": image_base64}
-                else:
-                    return False, f"Captcha olishda xatolik (Status {response.status_code})", {}
             except Exception as e:
-                logger.error(f"Error fetching OpenBudget captcha: {e}")
-                return False, f"OpenBudget Captcha serveriga ulanishda xatolik: {e}", {}
+                logger.warning(f"Captcha fetch attempt {attempt+1} failed: {e}")
+
+        return False, "OpenBudget Captcha serveriga ulanishda xatolik yuz berdi.", {}
 
     async def send_otp(
         self,
@@ -78,8 +85,6 @@ class OpenBudgetAPIService:
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Request OpenBudget API to send 6-digit SMS OTP code to the specified phone number.
-        Uses the v2 obfuscated /check endpoint extracted from the official APK.
-        Returns: (success: bool, message: str, extra_data: dict)
         """
         target_project = project_id or settings.OPENBUDGET_PROJECT_ID
         clean_phone = phone_number.replace("+", "").strip()
@@ -88,90 +93,76 @@ class OpenBudgetAPIService:
 
         logger.info(f"Requesting OpenBudget OTP for phone +{clean_phone} on project {target_project}")
 
-        # Development/Test mode fallback for local test board only
         if target_project == "board_123456":
             return True, "SMS tasdiqlash kodi yuborildi (Test rejimi).", {"token": "mock_test_token"}
 
-        # Multiple endpoint strategies (Official v2 obfuscated endpoint first, then standard v2/v1)
-        strategies = [
-            (
-                f"{self.base_url_v2}/vote/dfghgtrgffg/check",
-                {
-                    "phoneNumber": clean_phone,
-                    "phone": clean_phone,
-                    "initiativeId": target_project,
-                    "board_id": target_project,
-                    "captchaKey": captcha_key or "",
-                    "captchaResult": captcha_result or "",
-                    "captcha_key": captcha_key or "",
-                    "captcha_result": captcha_result or ""
-                }
-            ),
-            (
-                f"{self.base_url_v2}/vote/send-code",
-                {
-                    "phone": clean_phone,
-                    "board_id": target_project,
-                    "initiative_id": target_project,
-                    "application": target_project,
-                    "captcha_token": captcha_result or "",
-                    "captcha_key": captcha_key or ""
-                }
-            ),
-            (
-                f"{self.base_url_v1}/user/validate_phone/",
-                {
-                    "phone": clean_phone,
-                    "initiative_id": target_project
-                }
-            )
-        ]
+        client = self._get_client()
+        headers = self._get_headers()
 
-        last_error_msg = "OpenBudget API serveridan SMS so'rashda ulanish uzildi."
+        # Primary: v2 check endpoint
+        primary_url = f"{self.base_url_v2}/vote/dfghgtrgffg/check"
+        primary_payload = {
+            "phoneNumber": clean_phone,
+            "phone": clean_phone,
+            "initiativeId": target_project,
+            "board_id": target_project,
+            "captchaKey": captcha_key or "",
+            "captchaResult": captcha_result or "",
+            "captcha_key": captcha_key or "",
+            "captcha_result": captcha_result or ""
+        }
 
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, verify=False) as client:
-            for url, payload in strategies:
+        try:
+            response = await client.post(primary_url, json=primary_payload, headers=headers)
+            logger.info(f"OpenBudget OTP check status: {response.status_code}")
+
+            if response.status_code in [200, 201]:
+                data = response.json()
+                token = (
+                    data.get("otpKey")
+                    or data.get("token")
+                    or data.get("data", {}).get("token")
+                    or "token_ok"
+                )
+                msg = data.get("message") or data.get("error") or "SMS tasdiqlash kodi telefoningizga yuborildi!"
+                return True, msg, {"token": token, "otpKey": token, "raw": data}
+
+            elif response.status_code == 400:
                 try:
-                    headers = self._get_headers()
-                    response = await client.post(url, json=payload, headers=headers)
-                    logger.info(f"OpenBudget OTP status {response.status_code} from {url}")
+                    data = response.json()
+                    detail = data.get("detail") or data.get("message") or data.get("data", {}).get("detail") or ""
+                    if "used to vote" in str(detail).lower() or "avval" in str(detail).lower():
+                        return False, "⚠️ Bu raqam avval ushbu mavsumda ovoz berish uchun ishlatilgan!", {}
+                    if "captcha" in str(detail).lower():
+                        return False, "⚠️ Captcha kodi noto'g'ri kiritildi!", {}
+                    if detail:
+                        return False, f"OpenBudget: {detail}", {}
+                except Exception:
+                    pass
 
-                    if response.status_code in [200, 201]:
-                        data = response.json()
-                        if isinstance(data, dict):
-                            token = (
-                                data.get("otpKey")
-                                or data.get("token")
-                                or data.get("data", {}).get("token")
-                                or "token_ok"
-                            )
-                            msg = data.get("message") or data.get("error") or "SMS tasdiqlash kodi telefoningizga yuborildi!"
-                            return True, msg, {"token": token, "otpKey": token, "raw": data}
-                        return True, "SMS tasdiqlash kodi telefoningizga yuborildi!", {"token": "token_ok"}
+        except Exception as e:
+            logger.warning(f"Primary OTP endpoint error: {e}")
 
-                    elif response.status_code == 400:
-                        try:
-                            data = response.json()
-                            detail = data.get("detail") or data.get("message") or data.get("data", {}).get("detail") or ""
-                            if "used to vote" in str(detail).lower() or "avval" in str(detail).lower():
-                                return False, "⚠️ Bu raqam avval ushbu mavsumda ovoz berish uchun ishlatilgan!", {}
-                            if "captcha" in str(detail).lower():
-                                return False, "⚠️ Captcha kodi noto'g'ri kiritildi!", {}
-                            if detail:
-                                return False, f"OpenBudget: {detail}", {}
-                        except Exception:
-                            pass
+        # Fallback: v2 send-code endpoint
+        try:
+            fallback_url = f"{self.base_url_v2}/vote/send-code"
+            fallback_payload = {
+                "phone": clean_phone,
+                "board_id": target_project,
+                "initiative_id": target_project,
+                "application": target_project,
+                "captcha_token": captcha_result or "",
+                "captcha_key": captcha_key or ""
+            }
+            response = await client.post(fallback_url, json=fallback_payload, headers=headers)
+            if response.status_code in [200, 201]:
+                data = response.json()
+                token = data.get("token") or "token_ok"
+                return True, "SMS tasdiqlash kodi telefoningizga yuborildi!", {"token": token, "otpKey": token}
+        except Exception as err:
+            logger.warning(f"Fallback OTP endpoint error: {err}")
 
-                    elif response.status_code == 404:
-                        continue
-                    else:
-                        last_error_msg = f"OpenBudget server javobi (HTTP {response.status_code})."
-                except httpx.HTTPError as err:
-                    logger.warning(f"Endpoint {url} failed: {err}")
-                    last_error_msg = f"OpenBudget serveriga ulanishda xatolik ({err})."
-                    continue
-
-        return False, f"🔴 {last_error_msg} Iltimos qayta urinib ko'ring.", {}
+        return False, "🔴 OpenBudget serveridan SMS so'rashda xatolik yuz berdi. Iltimos qayta urinib ko'ring.", {}
 
     async def verify_otp(
         self,
@@ -182,8 +173,6 @@ class OpenBudgetAPIService:
     ) -> Tuple[bool, str, str]:
         """
         Verify 6-digit SMS OTP code with OpenBudget API.
-        Uses the v2 obfuscated /verify endpoint extracted from the official APK.
-        Returns: (success: bool, message: str, transaction_id: str)
         """
         target_project = project_id or settings.OPENBUDGET_PROJECT_ID
         clean_phone = phone_number.replace("+", "").strip()
@@ -197,66 +186,59 @@ class OpenBudgetAPIService:
                 return True, "Ovozingiz muvaffaqiyatli qabul qilindi! (Test)", f"OB_TX_{clean_phone[-4:]}_TEST"
             return False, "SMS kodi noto'g'ri kiritildi.", ""
 
-        strategies = [
-            (
-                f"{self.base_url_v2}/vote/iutyjmjyfgnmg/verify",
-                {
-                    "phoneNumber": clean_phone,
-                    "phone": clean_phone,
-                    "code": otp_code,
-                    "otp": otp_code,
-                    "otpKey": token or "",
-                    "token": token or "",
-                    "initiativeId": target_project
-                }
-            ),
-            (
-                f"{self.base_url_v2}/vote/verify-code",
-                {
-                    "phone": clean_phone,
-                    "code": otp_code,
-                    "token": token or "mock_token",
-                    "application": target_project,
-                    "board_id": target_project,
-                    "initiative_id": target_project
-                }
-            ),
-            (
-                f"{self.base_url_v1}/user/temp/vote/",
-                {
-                    "phone": clean_phone,
-                    "code": otp_code,
-                    "initiative_id": target_project
-                }
-            )
-        ]
+        client = self._get_client()
+        headers = self._get_headers()
 
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, verify=False) as client:
-            for url, payload in strategies:
+        # Primary: v2 verify endpoint
+        primary_url = f"{self.base_url_v2}/vote/iutyjmjyfgnmg/verify"
+        primary_payload = {
+            "phoneNumber": clean_phone,
+            "phone": clean_phone,
+            "code": otp_code,
+            "otp": otp_code,
+            "otpKey": token or "",
+            "token": token or "",
+            "initiativeId": target_project
+        }
+
+        try:
+            response = await client.post(primary_url, json=primary_payload, headers=headers)
+            logger.info(f"OpenBudget OTP verify status: {response.status_code}")
+
+            if response.status_code in [200, 201]:
+                data = response.json()
+                tx_id = data.get("transaction_id") or data.get("id") or f"OB_{clean_phone[-4:]}"
+                return True, "Ovozingiz muvaffaqiyatli tasdiqlandi!", str(tx_id)
+            else:
                 try:
-                    headers = self._get_headers()
-                    response = await client.post(url, json=payload, headers=headers)
-                    logger.info(f"OpenBudget verify status {response.status_code} from {url}")
+                    data = response.json()
+                    msg = data.get("message") or data.get("detail") or "SMS kodi noto'g'ri yoki muddati o'tgan."
+                    if "invalid" in str(msg).lower() or "noto'g'ri" in str(msg).lower():
+                        msg = "❌ Tasdiqlash kodi noto'g'ri kiritildi!"
+                    return False, msg, ""
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Primary verify error: {e}")
 
-                    if response.status_code in [200, 201]:
-                        data = response.json()
-                        tx_id = data.get("transaction_id") or data.get("id") or f"OB_{clean_phone[-4:]}"
-                        return True, "Ovozingiz muvaffaqiyatli tasdiqlandi!", str(tx_id)
-                    elif response.status_code == 404:
-                        continue
-                    else:
-                        try:
-                            data = response.json()
-                            msg = data.get("message") or data.get("detail") or "SMS kodi noto'g'ri yoki muddati o'tgan."
-                            if "invalid" in str(msg).lower() or "noto'g'ri" in str(msg).lower():
-                                msg = "❌ Tasdiqlash kodi noto'g'ri kiritildi!"
-                            return False, msg, ""
-                        except Exception:
-                            return False, "SMS kodi noto'g'ri kiritildi.", ""
-
-                except httpx.HTTPError as err:
-                    logger.warning(f"Verify endpoint {url} failed: {err}")
-                    continue
+        # Fallback: v2 verify-code
+        try:
+            fallback_url = f"{self.base_url_v2}/vote/verify-code"
+            fallback_payload = {
+                "phone": clean_phone,
+                "code": otp_code,
+                "token": token or "mock_token",
+                "application": target_project,
+                "board_id": target_project,
+                "initiative_id": target_project
+            }
+            response = await client.post(fallback_url, json=fallback_payload, headers=headers)
+            if response.status_code in [200, 201]:
+                data = response.json()
+                tx_id = data.get("transaction_id") or f"OB_{clean_phone[-4:]}"
+                return True, "Ovozingiz muvaffaqiyatli tasdiqlandi!", str(tx_id)
+        except Exception:
+            pass
 
         return False, "❌ OpenBudget serverida SMS kodi tasdiqlanmadi. Kod noto'g'ri kiritilgan bo'lishi mumkin.", ""
 
@@ -282,15 +264,15 @@ class OpenBudgetAPIService:
             "initiativeId": target_project
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, verify=False) as client:
-            try:
-                headers = self._get_headers()
-                response = await client.post(url, json=payload, headers=headers)
-                if response.status_code in [200, 201]:
-                    return True, "SMS qayta yuborildi!"
-                else:
-                    return False, f"SMS yuborib bo'lmadi (Status {response.status_code})"
-            except Exception as e:
-                return False, f"Xatolik: {e}"
+        try:
+            client = self._get_client()
+            headers = self._get_headers()
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code in [200, 201]:
+                return True, "SMS qayta yuborildi!"
+            else:
+                return False, f"SMS yuborib bo'lmadi (Status {response.status_code})"
+        except Exception as e:
+            return False, f"Xatolik: {e}"
 
 openbudget_api = OpenBudgetAPIService()
