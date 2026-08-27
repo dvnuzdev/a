@@ -35,11 +35,20 @@ async def main():
     except Exception as e:
         logger.warning(f"Redis fallback to MemoryStorage: {e}")
 
-    bot = Bot(token=settings.BOT_TOKEN)
+    clean_token = (os.getenv("BOT_TOKEN") or settings.BOT_TOKEN).strip().strip('"').strip("'")
+    logger.info(f"Connecting bot with token prefix: {clean_token[:10]}... (len: {len(clean_token)})")
+
+    bot = Bot(token=clean_token)
     dp = Dispatcher(storage=storage)
 
-    bot_info = await bot.get_me()
-    bot_identifier = "bot2" if (bot_info.id == 8913170688 or "8913170688" in settings.BOT_TOKEN) else "bot1"
+    try:
+        bot_info = await bot.get_me()
+    except Exception as err:
+        logger.error(f"❌ TELEGRAM BOT TOKEN XATOSI: {err}")
+        logger.error("Iltimos, Railway Variables bo'limidagi BOT_TOKEN to'g'riligini tekshiring!")
+        raise err
+
+    bot_identifier = "bot2" if (bot_info.id == 8913170688 or "8913170688" in clean_token) else "bot1"
     logger.info(f"Bot identified as: {bot_identifier.upper()} (@{bot_info.username})")
 
     # Anti-Flood Middleware Registration
