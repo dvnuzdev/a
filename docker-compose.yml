@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  bot1:
+    build: .
+    image: openbudget_bot:latest
+    container_name: openbudget_bot1_app
+    restart: always
+    command: python -u -m app.bot_runner
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./app:/app/app
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - openbudget_net
+
+  bot2:
+    build: .
+    image: openbudget_bot:latest
+    container_name: openbudget_bot2_app
+    restart: always
+    command: python -u -m app.bot_runner
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./app:/app/app
+    env_file:
+      - .env.bot2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - openbudget_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: openbudget_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openbudget_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_db_password}
+      POSTGRES_DB: ${POSTGRES_DB:-openbudget_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openbudget_user}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - openbudget_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: openbudget_redis
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - openbudget_net
+
+networks:
+  openbudget_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
